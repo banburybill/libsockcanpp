@@ -32,7 +32,7 @@ libsockcanpp was designed with use in CMake projects, but it can also easily be 
 1) clone the repository: `git clone https://github.com/SimonCahill/libsockcanpp.git`
 2) add the following to CMakeLists.txt
 ```cmake
-if (NOT TARGET sockcanpp)
+if (NOT TARGET libsockcanpp::libsockcanpp)
     # IF you need C++11 support:
     # set(sockcanpp_CONCEPT_SUPPORT OFF CACHE BOOL "Force C++ standard back to 11")
 
@@ -43,7 +43,7 @@ endif()
 
 target_link_libraries(
     # ...
-    sockcanpp
+    libsockcanpp::libsockcanpp
 )
 ```
 3) generate and build
