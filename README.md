@@ -29,6 +29,8 @@ libsockcanpp was designed with use in CMake projects, but it can also easily be 
 
 ## Incorporating into Cmake projects:
 
+### Git Clone
+
 1) clone the repository: `git clone https://github.com/SimonCahill/libsockcanpp.git`
 2) add the following to CMakeLists.txt
 ```cmake
@@ -49,122 +51,143 @@ target_link_libraries(
 3) generate and build
 4) ??? profit
 
-## Using the CAN driver
+### CPM
+If your project utilises CPM, you can also run
 
-libsockcanpp provides a simple interface to socketcan, which is represented by the CanDriver class.<br >
-`CanDriver` handles the setup of the socket; **it does not however setup the CAN interface!**
+```cmake
+CPMAddPackage(
+    NAME sockcanpp
+    GIT_REPOSITORY https://github.com/SimonCahill/libsockcanpp.git
+    GIT_TAG master
+)
+```
 
-### Instantiating CanDriver
+# Using libsockcanpp
 
-The example below describes how to instantiate a new instance of CanDriver.<br >
-You can create as many instances as required, the resources are `free`'d once the instance has gone out of scope or been deleted.
+## First Steps
 
-The following parameters are required for correct instantiation:
+In its current state, libsockcanpp doesn't support CANFD; very basic support exists for CANXL, although it is highly experimental and unstable.
 
-1) CAN interface: [v]can[0-?]
-2) CAN protocol: see [linux/can.h](https://github.com/linux-can/can-utils/blob/master/include/linux/can.h) for options
-3) (optional) CAN sender ID (arbitration ID)
+This library provides a basic and straightforward API.
+The main class is `CanDriver`; it is multi-instance and thread-safe.
 
-The following exceptions may be thrown if something went wrong during initialisation:
+### Setting up a CAN Socket
 
- - @see CanInitException
-    - if socketcan failed to initlialise
-    - if ioctl failed
-    - if socket binding failed
-
-CanDriver is fully thread-safe and can be used in multi-threaded applications.
+> [!NOTE]
+> This library does **NOT** setup the CAN interface.  
+> This can be done via the `ip` command:  
+> `$ sudo ip link set dev can0 up type can bitrate <baud>`  
+> `$ sudo ip link set dev van0 up type vcan`
 
 ```cpp
 #include <CanDriver.hpp>
 
 using sockcanpp::CanDriver;
+using sockcanpp::CanMessage;
+using sockcanpp::exceptions::CanException;
 
 int main() {
-    CanDriver canDriver("can0", CAN_RAW[, 0xbad]);
 
-    return 0;
+    CanDriver cDriver{"can0", CAN_RAW}; // No default sender ID
+    
+    try {
+        cDriver.initialiseSocketCan();
+    } catch (CanException& ex) {
+        // handle failure
+    }
+
+    sendCanFrame(cDriver);
+    sendMultipleFrames(cDriver);
+    receiveFrame(cDriver);
+
+    cDriver.setErrorFilter(); // Receive error frames
+
+    filtermap_t canFilters{
+        { 0x489,    0x7ff } // filter messages with 0x489 as ID
+    };
+    cDriver.setCanFilters(canFilters); // Set X amount of CAN filters. See https://docs.kernel.org/networking/can.html#raw-protocol-sockets-with-can-filters-sock-raw
+
+    cDriver.setCollectTelemetry(); // Enable telemetry collection, such as timestamps, data sent, etc.
+
+    cDriver.setReceiveOwnMessages(); // Echo sent frames back
+
+    cDriver.setReturnRelativeTimestamps(); // Enable relative timestamps
+
 }
 ```
 
-### Using CAN IDs
-
-libsockcanpp provides a first-class datatype, @see CanId, which acts as an integer which can be either 11 or 29 bits in size.<br >
-The @see CanId type is used through libsockcanpp to provide a semi fool-proof method of using CAN arbitration IDs without the pitfalls of using traditional 32-bit integers.
-
-CanId supports the following operations:
- - bitwise AND/OR
- - casting to: [u]int16, [u]int32
- - basic comparison:
-    - equal to
-    - not equal to
-    - greater than (or equal to)
-    - less than (or equal to)
- - arithmetic:
-    - addition
-    - subtraction
-
-### Sending CAN frames
-
-Sending CAN frames with sockcanpp is as easy as you could imagine.
-
-1) instantiate a @see CanDriver object
-2) create a @see CanMessage
-3) send message
+### Sending a single CAN frame
 
 ```cpp
-#include <CanDriver.hpp>
-
-using sockcanpp::CanDriver;
-using sockcanpp::CanId;
-using sockcanpp::CanMessage;
-
-void sendCanFrameExample() {
-    CanDriver canDriver("can0", CAN_RAW[, 0xd00d]);
-
-    CanMessage messageToSend(0 /*send with default ID*/, "8 bytes!" /* the data */);
-
-    auto sentByteCount = canDriver.sendMessage(messageToSend[, false /* don't force extended ID */]);
-
-    printf("Sent %d bytes via CAN!\n", sentByteCount);
+void sendCanFrame(CanDriver& driver) {
+    CanMessage msg{0x123, "\x01\x02\x03\x04\x05\x06\x07\x08"};
+    driver.sendMessage(msg);
+    driver.sendMessage(msg, true); // force extended CAN frame
 }
+```
 
-void sendMultipleFramesExample() {
-    CanDriver canDriver("can1", CAN_RAW[, 0 /* no default ID */]);
+### Sending multiple CAN frames
 
-    queue<CanMessage> messageQueue = {
-        CanMessage(0x269, "somedata"),
-        Canmessage(0x1e9, "moredata")
+```cpp
+void sendMultipleFrames(CanDriver& driver) {
+    vector<CanMessage> messages{
+        CanMessage{0x123, "\x01\x02\x03\x04\x05\x06\x07\x08"},
+        CanMessage{0x456, "\x09\x10\x11\x12\x13\x14\x15\x16"}
     };
 
-    auto sentByteCount = canDriver.sendMessageQueue(messageQueue[, milliseconds(20) /* delay between frames */[, false /* don't force extended ID */]]);
+    using namespace std::chrono::literals;
 
-    printf("Sent %d bytes via CAN!\n", sentByteCount);
-
+    driver.sendMessageQueue(messages); // 20ms delay (Default)
+    driver.sendMessageQueue(messages, 20ns); // 20ns delay
+    driver.sendMessageQueue(messages, 20us, true); // 20microseconds delay | force extended
 }
 ```
 
-### Receiving messages via CAN
-
-Receiving CAN messages is almost as simple as sending them! Firstly, check if there are any messages in the buffer, then pull them out; either one-by-one, or all at once!
+### Receiving a frame
 
 ```cpp
-#include <CanDriver.hpp>
+void receiveFrame(CanDriver& driver) {
+    if (!driver.waitForMessages()) { return; } // No messages in buffer
 
-using sockcanpp::CanDriver;
-using sockcanpp::CanId;
-using sockcanpp::CanMessage;
+    const auto receivedMsg = driver.readMessage();
+    std::cout << receivedMsg << std::endl; // Outputs: CanMessage(canId: XXX, data: FF FF FF FF, timestampOffset: Nms)
 
-void receiveCanFramesExample() {
-    CanDriver canDriver("can2", CAN_RAW[, 0 /* no default ID */]);
-
-    if (canDriver.waitForMessages([milliseconds(3000) /* timeout */])) {
-        // read a single message
-        CanMessage receivedMessage = canDriver.readMessage();
-
-        // read all available messages
-        queue<CanMessage> receivedMessages = canDriver.readQueuedMessages();
-
-        // handle CAN frames
+    if (receivedMsg.isErrorFrame()) {
+        handleErrorFrame(receivedMsg);
     }
 }
 ```
+
+### Handling an Error Frame
+
+libsockcanpp also provides features for evaluating errors states on the bus.  
+To enable this feature, `cDriver.setErrorFilter();` needs to be enabled.
+
+When an error frame is received, the information is provided by the `CanMessage` class.
+
+```cpp
+void handleErrorFrame(const CanMessage& msg) {
+
+    // Handle as you see fit
+
+    const auto hasBusError = msg.hasBusError();
+    const auto hasBusOffError = msg.hasBusOffError();
+    const auto hasControllerProblem = msg.hasControllerProblem();
+    const auto hasControllerRestarted = msg.hasControllerRestarted();
+    const auto hasErrorCounter = msg.hasErrorCounter();
+    const auto hasLostArbitration = msg.hasLostArbitration();
+    const auto hasProtocolViolation = msg.hasProtocolViolation();
+    const auto hasTransceiverStatus = msg.hasTransceiverStatus();
+    const auto missingAckOnTransmit = msg.missingAckOnTransmit();
+    const auto isTxTimeout = msg.isTxTimeout();
+
+    const auto controllerError = msg.getControllerError();
+    const auto protocolError = msg.getProtocolError();
+    const auto transceiverError = msg.getTransceiverError();
+    const auto txErrorCounter = msg.getTxErrorCounter();
+    const auto rxErrorCounter = msg.getRxErrorCounter();
+    const auto arbitrationLostInBit = msg.arbitrationLostInBit();
+}
+```
+
+© 2020–2025 Simon Cahill — Licensed under Apache License 2.0

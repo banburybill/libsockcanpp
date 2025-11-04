@@ -20,18 +20,24 @@
  *  limitations under the License.
  */
 
-#ifndef LIBSOCKPP_INCLUDE_CANID_HPP
-#define LIBSOCKPP_INCLUDE_CANID_HPP
+#ifndef LIBSOCKCANPP_INCLUDE_CANID_HPP
+#define LIBSOCKCANPP_INCLUDE_CANID_HPP
 
 //////////////////////////////
 //      SYSTEM INCLUDES     //
 //////////////////////////////
+// stl
 #include <algorithm>
 #include <bitset>
 #include <cmath>
+#include <cstdint>
 #include <exception>
-#include <linux/can.h>
+#include <ostream>
 #include <system_error>
+
+// libc
+#include <linux/can.h>
+#include <linux/can/error.h>
 
 #if __cpp_concepts >= 201907
 template<typename Str>
@@ -46,6 +52,17 @@ concept Integral = requires(Int i) { std::is_integral_v<Int>; };
 template<typename C>
 concept ConvertibleToCanId = Stringable<C> || Integral<C> || CChar<C>;
 #endif
+
+#ifndef CAN_ERR_CNT
+/**
+ * Fallback definition for CAN_ERR_CNT.
+ * The value 0x00000200U is defined by the Linux CAN subsystem (see <linux/can/error.h>).
+ * This fallback is provided in case the system headers do not define CAN_ERR_CNT,
+ * such as when building on non-Linux systems or with older kernel headers.
+ * See: https://elixir.bootlin.com/linux/latest/source/include/uapi/linux/can/error.h
+ */
+#define CAN_ERR_CNT 0x00000200U
+#endif // CAN_ERR_CNT
 
 namespace sockcanpp {
 
@@ -73,6 +90,11 @@ namespace sockcanpp {
 
         public: // +++ Operators +++
             constexpr canid_t operator *() const { return m_identifier; } //!< Returns the raw CAN ID value.
+
+            friend std::ostream& operator <<(std::ostream& os, const CanId& id) {
+                os << std::hex << id.m_identifier;
+                return os;
+            } //!< Outputs the CanId to a stream in hexadecimal format.
 
 #pragma region "Conversions"
         constexpr operator int16_t()  const { return static_cast<int16_t>(m_identifier) & CAN_ERR_MASK; }
@@ -132,33 +154,55 @@ namespace sockcanpp {
         constexpr bool operator >(T x)               const { return static_cast<canid_t>(x) > m_identifier; } //!< Compares this ID to a 32-bit integer.
 
         template<typename T>
-        constexpr bool operator <=(const T x)        const { return x.m_identifier <= m_identifier; } //!< Compares this ID to another.
+        constexpr bool operator <=(const T x)        const { return m_identifier <= static_cast<canid_t>(x); } //!< Compares this ID to another.
 
         template<typename T>
-        constexpr bool operator >=(const T x)        const { return x.m_identifier >= m_identifier; } //!< Compares this ID to another.
+        constexpr bool operator >=(const T x)        const { return m_identifier >= static_cast<canid_t>(x); } //!< Compares this ID to another.
 #pragma endregion
 
 #pragma region "Assignment Operators"
+        #if __cplusplus >= 201703L
         template<typename T>
-        constexpr CanId operator =(const T val) { return CanId(val); } //!< Assigns a new integer to this CanID
+        constexpr CanId& operator =(const T val) { m_identifier = val; return *this; } //!< Assigns a new integer to this CanID
+        #else
+        template<typename T>
+        CanId& operator =(const T val) {
+            m_identifier = static_cast<canid_t>(val);
+            return *this;
+        } //!< Assigns a new integer to this CanID
+        #endif // __cplusplus >= 201703L
 
         #if __cpp_concepts >= 201907
         template<Stringable T>
-        CanId operator =(const T& val) {
+        CanId& operator =(const T& val) {
             return operator=(std::stoul(val.data(), nullptr, 16));
         }
         #endif // __cpp_concepts >= 201907
 
-        constexpr CanId operator =(const int64_t val) { return operator =((canid_t)val); } //!< Assigns a 64-bit integer to this ID.
+        
+        #if __cplusplus >= 201703L
+        constexpr CanId& operator =(const int64_t val) { return operator =((canid_t)val); } //!< Assigns a 64-bit integer to this ID.
 
         template<typename T>
-        constexpr CanId operator |=(const T x) { return m_identifier |= x; } //!< Performs a bitwise OR operation on this ID and another.
+        constexpr CanId& operator |=(const T x) { m_identifier |= x; return *this; } //!< Performs a bitwise OR operation on this ID and another.
 
         template<typename T>
-        constexpr CanId operator &=(const T x) { return m_identifier &= x; } //!< Performs a bitwise AND operation on this ID and another.
+        constexpr CanId& operator &=(const T x) { m_identifier &= x; return *this; } //!< Performs a bitwise AND operation on this ID and another.
 
         template<typename T>
-        constexpr CanId operator ^=(const T x) { return m_identifier ^= x; } //!< Performs a bitwise XOR operation on this ID and another.
+        constexpr CanId& operator ^=(const T x) { m_identifier ^= x; return *this; } //!< Performs a bitwise XOR operation on this ID and another.
+        #else
+        CanId& operator =(const int64_t val) { return operator =((canid_t)val); } //!< Assigns a 64-bit integer to this ID.
+
+        template<typename T>
+        CanId& operator |=(const T x) { m_identifier |= x; return *this; } //!< Performs a bitwise OR operation on this ID and another.
+
+        template<typename T>
+        CanId& operator &=(const T x) { m_identifier &= x; return *this; } //!< Performs a bitwise AND operation on this ID and another.
+
+        template<typename T>
+        CanId& operator ^=(const T x) { m_identifier ^= x; return *this; } //!< Performs a bitwise XOR operation on this ID and another.
+        #endif // __cplusplus >= 201703L
 #pragma endregion
 
 #pragma region "Arithmetic Operators"
@@ -247,13 +291,25 @@ namespace sockcanpp {
             }
 
         public: // +++ Getters +++
-            constexpr bool hasErrorFrameFlag() const { return isErrorFrame(m_identifier); } //!< Indicates whether or not this ID is an error frame.
-            constexpr bool hasRtrFrameFlag() const { return isRemoteTransmissionRequest(m_identifier); } //!< Indicates whether or not this ID is a remote transmission request.
-            constexpr bool isStandardFrameId() const { return !isExtendedFrame(m_identifier); } //!< Indicates whether or not this ID is a standard frame ID.
-            constexpr bool isExtendedFrameId() const { return isExtendedFrame(m_identifier); } //!< Indicates whether or not this ID is an extended frame ID.
+            constexpr bool hasErrorFrameFlag()  const { return isErrorFrame(m_identifier); } //!< Indicates whether or not this ID is an error frame.
+            constexpr bool hasRtrFrameFlag()    const { return isRemoteTransmissionRequest(m_identifier); } //!< Indicates whether or not this ID is a remote transmission request.
+            constexpr bool isStandardFrameId()  const { return !isExtendedFrame(m_identifier); } //!< Indicates whether or not this ID is a standard frame ID.
+            constexpr bool isExtendedFrameId()  const { return isExtendedFrame(m_identifier); } //!< Indicates whether or not this ID is an extended frame ID.
 
         public: // +++ Equality Checks +++
             constexpr bool equals(const CanId& otherId) const { return m_identifier == otherId.m_identifier; } //!< Compares this ID to another.
+
+        public: // +++ Error Frame Handling +++
+            constexpr bool hasBusError()            const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_BUSERROR); } //!< Checks if this ID has a bus error.
+            constexpr bool hasBusOffError()         const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_BUSOFF); } //!< Checks if this ID has a bus-off error.
+            constexpr bool hasControllerProblem()   const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_CRTL); } //!< Checks if this ID has a controller problem.
+            constexpr bool hasControllerRestarted() const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_RESTARTED); } //!< Checks if this ID has a controller restarted error.
+            constexpr bool hasErrorCounter()        const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_CNT); } //!< Checks if this ID has an error counter.
+            constexpr bool hasLostArbitration()     const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_LOSTARB); } //!< Checks if this ID has lost arbitration.
+            constexpr bool hasProtocolViolation()   const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_PROT); } //!< Checks if this ID has a protocol violation.
+            constexpr bool hasTransceiverStatus()   const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_TRX); } //!< Checks if this ID has a transceiver status error.
+            constexpr bool missingAckOnTransmit()   const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_ACK); } //!< Checks if this ID is missing an ACK on transmit.
+            constexpr bool isTxTimeout()            const { return hasErrorFrameFlag() && (m_identifier & CAN_ERR_TX_TIMEOUT); } //!< Checks if this ID is a transmission timeout error frame.
 
         private: // +++ Variables +++
             uint32_t m_identifier = 0;
@@ -269,4 +325,4 @@ namespace sockcanpp {
 
 }
 
-#endif // LIBSOCKPP_INCLUDE_CANID_HPP
+#endif // LIBSOCKCANPP_INCLUDE_CANID_HPP
